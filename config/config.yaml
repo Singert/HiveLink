@@ -1,0 +1,14 @@
+# 邮箱配置
+smtp:
+  host: localhost
+  port: 8024
+  username: agent@localhost
+  password: ""
+imap:
+  host: localhost
+  port: 8024
+  username: controller@localhost
+  password: ""
+
+control_email: controller@localhost
+agent_email: agent@localhost

